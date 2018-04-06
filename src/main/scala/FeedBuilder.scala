@@ -3,16 +3,15 @@ import java.time._
 import java.util.Date
 import java.util.Calendar
 
-import biweekly.{Biweekly, ICalendar}
+import biweekly.ICalendar
 import biweekly.component.VEvent
-import biweekly.util.Duration
 import doobie._
 import doobie.implicits._
 import cats._
 import cats.data._
 import cats.effect.IO
 import cats.implicits._
-import com.typesafe.config.{Config, ConfigFactory}
+import com.typesafe.config.ConfigFactory
 
 import scala.util.Try
 
