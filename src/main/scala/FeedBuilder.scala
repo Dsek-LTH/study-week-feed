@@ -9,82 +9,78 @@ import doobie._
 import doobie.implicits._
 import cats._
 import cats.data._
-import cats.effect.IO
+import cats.effect._
 import cats.implicits._
+import cats.syntax.functor._, cats.syntax.flatMap._
 import com.typesafe.config.ConfigFactory
-
+import org.http4s._
+import org.http4s.dsl.io._
+import org.http4s.EntityEncoder._
+import scala.concurrent.ExecutionContext.Implicits.global
+import fs2.Stream
+import scala.language.higherKinds
 import scala.util.Try
+import org.http4s.server.blaze._
+import scala.concurrent.duration._
 
+object FeedBuilder extends IOApp {
 
-object FeedBuilder {
-  def query(year: Int, week: Int): Query0[Int] = sql"SELECT studyweek FROM studyweeks WHERE year = '$year' AND week = '$week'".query[Int]
-  def getStudyWeek(date: Date): ConnectionIO[Option[Int]] = {
+  def query(year: Int): Query0[(Date, Int)] = sql"SELECT (week, studyweek) FROM studyweeks WHERE year >= '$year'".query[(Date, Int)]
+
+  def getStudyWeeks(date: Date): Stream[ConnectionIO, (Date, Int)] = {
     val calendar = Calendar.getInstance()
     calendar.setTime(date)
     val year = calendar.get(Calendar.YEAR)
-    val week = calendar.get(Calendar.WEEK_OF_YEAR)
-    query(year, week).option
+    query(year).stream
   }
 
-  def createStudyWeekEvent(date: Date, weekNbr: Int): VEvent = {
+  def createStudyWeekEvent(date: Date, weekNbr: Int, currentDate: Date): VEvent = {
     val event = new VEvent()
     event.setDateStart(date, false)
     event.setSummary(s"Läsvecka $weekNbr")
-    event.setCreated(Date.from(LocalDateTime.now().atZone(ZoneId.systemDefault()).toInstant))
+    event.setCreated(currentDate)
     event.setOrganizer("rootm@dsek.se")
     event.addComment("Är den här veckan fel? Kontakta rootm@dsek.se")
     event
   }
 
-  lazy val mondays: Stream[Date] = {
-    val today = Calendar.getInstance()
-    today.setTime(Date.from(Instant.now()))
-    val monday = Calendar.getInstance()
-    monday.setTime(today.getTime)
-    val daysAfterMonday = (today.get(Calendar.DAY_OF_WEEK) - Calendar.MONDAY + 7) % 7 // SUNDAY - MONDAY == -1, -1 % 7 == -1, want 6
-    monday.add(Calendar.DAY_OF_WEEK, -daysAfterMonday)
-    Stream.continually({monday.add(Calendar.DAY_OF_WEEK, 7); monday.getTime})
-  }
-
-  def makeICal(datesAndWeekNumbers: Seq[(Date, Int)]): ICalendar = {
+  // Encapsulates the non-referentially transparent ICalendar class into referentially transparent IO transformations
+  def makeICal(datesAndWeekNumbers: Stream[IO, (Date, Int)], currentDate: Date): IO[String] = {
     val ical = new ICalendar()
-    datesAndWeekNumbers.seq
-      .map((createStudyWeekEvent(_,_)).tupled)
-      .foreach(ical.addEvent)
-    ical
+    datesAndWeekNumbers
+      .map{ case (date, week) => createStudyWeekEvent(date, week, currentDate) }
+      .compile
+      .fold(ical)((ical, event) => {ical.addEvent(event); ical})
+      .map(ical => ical.write())
   }
 
-
-
-  def main(args: Array[String]): Unit = {
-
-    val config = ConfigFactory.load()
-    Class.forName("com.mysql.cj.jdbc.Driver")
-    val xa = Transactor.fromConnection[IO] {
-      DriverManager.getConnection(
-        config.getString("mysql.url"),
-        config.getString("mysql.user"),
-        config.getString("mysql.password")
-      )
-    }
-
-    lazy val weekNumbers = mondays.map(getStudyWeek)
-      .map(_.transact(xa))
-      .map(io =>
-        Try(io.unsafeRunSync)
-          .toOption.flatten
-      )
-
-    lazy val datesAndWeekNumbers = mondays.zip(weekNumbers)
-      .take(20)
-      .collect{case (date, Some(weekNbr)) => date -> weekNbr}
-
-    val ical = makeICal(datesAndWeekNumbers)
-    ical.write(System.out)
+  def service(xa: Transactor[IO])(implicit C: cats.effect.Clock[IO]): HttpApp[IO] = HttpApp.liftF[IO] {
+    C.realTime(MILLISECONDS).flatMap(currentMillis => {
+      val now = new Date(currentMillis)
+      val datesAndWeekNumbers: Stream[IO, (Date, Int)] = getStudyWeeks(now).transact(xa)
+      Ok(makeICal(datesAndWeekNumbers.take(20), now))
+    })
   }
 
+  lazy val config = ConfigFactory.load()
+  Class.forName("com.mysql.cj.jdbc.Driver")
+  lazy val xa = Transactor.fromConnection[IO] (
+    DriverManager.getConnection(
+      config.getString("mysql.url"),
+      config.getString("mysql.user"),
+      config.getString("mysql.password")
+    ),
+    scala.concurrent.ExecutionContext.global
+  )
 
-
+  override def run(args: List[String]): IO[ExitCode] =
+    BlazeServerBuilder[IO]
+      .bindHttp(8080, "localhost")
+      .withHttpApp(service(xa))
+      .serve
+      .compile
+      .drain
+      .flatMap(_ => IO.pure(ExitCode.Success))
 
 }
 //my $week_result = $mysql_con->query("SELECT studyweek FROM studyweeks WHERE year = '$year' AND week = '$week'");
