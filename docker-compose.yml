@@ -6,17 +6,16 @@ services:
       - "8080:8080"
     depends_on:
       - db
-    environment:
-      JDBC_URL: jdbc:mysql://db/studyweeks
+    env_file:
+      - ./main.dev.env
+      - ./main.prod.env
     restart: unless-stopped
   db:
     image: mysql/mysql-server:8.0
     ports:
       - "3306"
-    environment:
-      MYSQL_DATABASE: studyweeks
-      MYSQL_USER: testuser
-      MYSQL_PASSWORD: password
-      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    env_file:
+      - ./db.dev.env
+      - ./db.prod.env
     volumes:
       - "./database_init/:/docker-entrypoint-initdb.d/:ro"
