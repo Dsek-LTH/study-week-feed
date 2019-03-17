@@ -25,19 +25,31 @@ import scala.concurrent.duration._
 
 object FeedBuilder extends IOApp {
 
-  def query(year: Int): Query0[(Date, Int)] = sql"SELECT (week, studyweek) FROM studyweeks WHERE year >= '$year'".query[(Date, Int)]
+  def query(year: Int): Query0[(Int, String)] = sql"SELECT week, studyweek FROM studyweeks WHERE year >= $year;".query[(Int, String)]
 
-  def getStudyWeeks(date: Date): Stream[ConnectionIO, (Date, Int)] = {
+  def getStudyWeeks(date: Date): Stream[ConnectionIO, (Date, String)] = {
     val calendar = Calendar.getInstance()
     calendar.setTime(date)
     val year = calendar.get(Calendar.YEAR)
     query(year).stream
+      .map{
+        case (weekNbr, studyWeek) => (getMondayOfWeek(year, weekNbr), studyWeek)
+      }
   }
 
-  def createStudyWeekEvent(date: Date, weekNbr: Int, currentDate: Date): VEvent = {
+  def getMondayOfWeek(year: Int, weekNbr: Int): Date = {
+    val cal = Calendar.getInstance()
+    cal.set(Calendar.YEAR, year)
+    cal.set(Calendar.WEEK_OF_YEAR, weekNbr)
+    cal.set(Calendar.DAY_OF_WEEK, Calendar.MONDAY)
+    cal.getTime()
+  }
+
+  // Unfortunately returns mutable object, breaking referential transparency :(
+  def createStudyWeekEvent(date: Date, weekDescriptor: String, currentDate: Date): VEvent = {
     val event = new VEvent()
     event.setDateStart(date, false)
-    event.setSummary(s"Läsvecka $weekNbr")
+    event.setSummary(s"$weekDescriptor")
     event.setCreated(currentDate)
     event.setOrganizer("rootm@dsek.se")
     event.addComment("Är den här veckan fel? Kontakta rootm@dsek.se")
@@ -45,7 +57,7 @@ object FeedBuilder extends IOApp {
   }
 
   // Encapsulates the non-referentially transparent ICalendar class into referentially transparent IO transformations
-  def makeICal(datesAndWeekNumbers: Stream[IO, (Date, Int)], currentDate: Date): IO[String] = {
+  def makeICal(datesAndWeekNumbers: Stream[IO, (Date, String)], currentDate: Date): IO[String] = {
     val ical = new ICalendar()
     datesAndWeekNumbers
       .map{ case (date, week) => createStudyWeekEvent(date, week, currentDate) }
@@ -57,7 +69,7 @@ object FeedBuilder extends IOApp {
   def service(xa: Transactor[IO])(implicit C: cats.effect.Clock[IO]): HttpApp[IO] = HttpApp.liftF[IO] {
     C.realTime(MILLISECONDS).flatMap(currentMillis => {
       val now = new Date(currentMillis)
-      val datesAndWeekNumbers: Stream[IO, (Date, Int)] = getStudyWeeks(now).transact(xa)
+      val datesAndWeekNumbers: Stream[IO, (Date, String)] = getStudyWeeks(now).transact(xa)
       Ok(makeICal(datesAndWeekNumbers.take(20), now))
     })
   }
@@ -75,7 +87,7 @@ object FeedBuilder extends IOApp {
 
   override def run(args: List[String]): IO[ExitCode] =
     BlazeServerBuilder[IO]
-      .bindHttp(8080, "localhost")
+      .bindHttp(8080, "0.0.0.0")
       .withHttpApp(service(xa))
       .serve
       .compile
