@@ -25,15 +25,21 @@ import scala.concurrent.duration._
 
 object FeedBuilder extends IOApp {
 
-  def query(year: Int): Query0[(Int, String)] = sql"SELECT week, studyweek FROM studyweeks WHERE year >= $year;".query[(Int, String)]
+  def query(year: Int, week: Int): Query0[(Int, String, Int)] = sql"""
+    SELECT week, studyweek, year
+    FROM studyweeks
+    WHERE year > $year
+      OR year = $year AND week >= $week
+    ORDER BY year, week;""".query[(Int, String, Int)]
 
   def getStudyWeeks(date: Date): Stream[ConnectionIO, (Date, String)] = {
     val calendar = Calendar.getInstance()
     calendar.setTime(date)
-    val year = calendar.get(Calendar.YEAR)
-    query(year).stream
-      .map{
-        case (weekNbr, studyWeek) => (getMondayOfWeek(year, weekNbr), studyWeek)
+    val currentYear = calendar.get(Calendar.YEAR)
+    val currentWeek = calendar.get(Calendar.WEEK_OF_YEAR)
+    query(currentYear, currentWeek).stream
+      .map {
+        case (weekNbr, studyWeek, year) => (getMondayOfWeek(year, weekNbr), studyWeek)
       }
   }
 
